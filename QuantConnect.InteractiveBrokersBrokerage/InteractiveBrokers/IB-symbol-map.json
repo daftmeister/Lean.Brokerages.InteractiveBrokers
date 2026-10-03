@@ -39,6 +39,8 @@
     "SML": "SP600",
     "CVK": "SPSV",
     "WFVK.IV": "DWCF",
-    "K200": "KM"
+    "K200": "KM",
+    "BFX": "BEL20",
+    "FTMIB": "FTSEMIB"
   }
 }

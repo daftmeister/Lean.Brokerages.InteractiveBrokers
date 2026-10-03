@@ -227,7 +227,46 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
             { Market.CFE, "CFE" },
             { Market.NYSELIFFE, "NYSELIFFE" },
             { Market.EUREX, "EUREX" },
-            { Market.KRX, "KSE" }
+            { Market.KRX, "KSE" },
+            { Market.EuronextParis, "MONEP" },
+            { Market.EuronextAmsterdam, "FTA" },
+            { Market.EuronextBrussels, "BELFOX" },
+            { Market.EuronextMilan, "IDEM" }
+        };
+
+        // IB primary exchange of the stocks listed on each Euronext venue
+        private static readonly Dictionary<string, string> _euronextEquityExchanges = new()
+        {
+            { Market.EuronextParis, "SBF" },
+            { Market.EuronextAmsterdam, "AEB" },
+            { Market.EuronextBrussels, "ENEXT.BE" },
+            { Market.EuronextDublin, "ISED" },
+            { Market.EuronextMilan, "BVME" },
+            { Market.EuronextLisbon, "BVL" },
+            { Market.EuronextOslo, "OSE" }
+        };
+
+        // LEAN market of the stocks by their IB primary exchange, for the non USA equity markets
+        private static readonly Dictionary<string, string> _equityMarketsByExchange = _euronextEquityExchanges
+            .ToDictionary(kvp => kvp.Value, kvp => kvp.Key, StringComparer.InvariantCultureIgnoreCase);
+
+        // Euronext securities not supported until their IB routing is verified:
+        // - Euronext Oslo: IB lists some Norwegian stocks under OMXNO instead of OSE, and offers no OBX futures
+        // - Mini FTSE MIB futures: IB's listing and trading class (MINI) are not confirmed
+        private static readonly HashSet<string> _unsupportedMarkets = new() { Market.EuronextOslo };
+        private static readonly HashSet<(string Market, string Ticker)> _unsupportedFutures = new()
+        {
+            (Market.EuronextMilan, Futures.Indices.FTSEMIBMini)
+        };
+
+        // IB exchange of the Euronext indices
+        private static readonly Dictionary<string, string> _euronextIndexExchanges = new()
+        {
+            { Market.EuronextParis, "MONEP" },
+            { Market.EuronextAmsterdam, "FTA" },
+            { Market.EuronextBrussels, "BELFOX" },
+            { Market.EuronextMilan, "IDEM" },
+            { Market.EuronextOslo, "OSE" }
         };
 
         private static readonly SymbolPropertiesDatabase _symbolPropertiesDatabase = SymbolPropertiesDatabase.FromDataFolder();
@@ -450,6 +489,12 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
         {
             try
             {
+                // rejecting any leg or contingent order keeps the whole group from being placed
+                if (RejectUnsupportedSymbol(order.Symbol, nameof(PlaceOrder)))
+                {
+                    return false;
+                }
+
                 if (!IsConnected)
                 {
                     Log.Trace($"InteractiveBrokersBrokerage.PlaceOrder(): Symbol: {order.Symbol.Value} Quantity: {order.Quantity}. Id: {order.Id}");
@@ -491,6 +536,11 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
             try
             {
                 Log.Trace($"InteractiveBrokersBrokerage.UpdateOrder(): Symbol: {order.Symbol.Value} Quantity: {order.Quantity} Status: {order.Status} Id: {order.Id}");
+
+                if (RejectUnsupportedSymbol(order.Symbol, nameof(UpdateOrder)))
+                {
+                    return false;
+                }
 
                 if (!IsConnected)
                 {
@@ -3723,6 +3773,12 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
         /// <returns>A new IB contract for the order</returns>
         private Contract CreateContract(Symbol symbol, bool includeExpired, List<Order> orders = null, string exchange = null)
         {
+            // last line of defense: no IB contract, so no order nor data request, for the symbols not supported yet
+            if (IsUnsupportedSymbol(symbol, out var unsupportedReason))
+            {
+                throw new NotSupportedException(unsupportedReason);
+            }
+
             var securityType = ConvertSecurityType(symbol.SecurityType);
             var ibSymbol = _symbolMapper.GetBrokerageSymbol(symbol);
 
@@ -3770,7 +3826,11 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
             }
             else if (symbol.ID.SecurityType == SecurityType.Equity)
             {
-                contract.PrimaryExch = GetPrimaryExchange(contract, symbol);
+                // there are no map files for the Euronext markets, and the same ticker can be listed in the same currency
+                // on several exchanges (e.g. Amsterdam and Xetra), so the primary exchange is given by the LEAN market
+                contract.PrimaryExch = _euronextEquityExchanges.TryGetValue(symbol.ID.Market, out var euronextExchange)
+                    ? euronextExchange
+                    : GetPrimaryExchange(contract, symbol);
             }
             // Indexes requires that the exchange be specified exactly
             else if (symbol.ID.SecurityType == SecurityType.Index)
@@ -3782,6 +3842,10 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
                 else if(string.Equals(symbol.ID.Market, Market.KRX, StringComparison.InvariantCultureIgnoreCase))
                 {
                     contract.Exchange = "KSE";
+                }
+                else if (_euronextIndexExchanges.TryGetValue(symbol.ID.Market, out var euronextIndexExchange))
+                {
+                    contract.Exchange = euronextIndexExchange;
                 }
                 else
                 {
@@ -3833,6 +3897,7 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
                 contract.Exchange = GetSymbolExchange(symbol);
 
                 contract.Multiplier = GetContractMultiplier(symbolProperties.ContractMultiplier);
+                contract.TradingClass = InteractiveBrokersSymbolMapper.GetFutureTradingClass(symbol.ID.Symbol);
 
                 contract.IncludeExpired = includeExpired;
             }
@@ -4323,6 +4388,66 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
         }
 
         /// <summary>
+        /// Determines whether the symbol, or its underlying, is not supported yet by this brokerage
+        /// </summary>
+        internal static bool IsUnsupportedSymbol(Symbol symbol, out string reason)
+        {
+            reason = null;
+            for (var current = symbol; current != null; current = current.HasUnderlying ? current.Underlying : null)
+            {
+                if (_unsupportedMarkets.Contains(current.ID.Market))
+                {
+                    reason = $"{current.ID.Market} securities are not supported yet by the Interactive Brokers brokerage: {symbol}";
+                    return true;
+                }
+                if (current.SecurityType == SecurityType.Future && _unsupportedFutures.Contains((current.ID.Market, current.ID.Symbol)))
+                {
+                    reason = $"{current.ID.Symbol} futures are not supported yet by the Interactive Brokers brokerage: {symbol}";
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// Rejects the operation if the symbol is not supported yet, notifying the reason
+        /// </summary>
+        private bool RejectUnsupportedSymbol(Symbol symbol, string operation)
+        {
+            if (!IsUnsupportedSymbol(symbol, out var reason))
+            {
+                return false;
+            }
+
+            Log.Error($"InteractiveBrokersBrokerage.{operation}(): {reason}");
+            OnMessage(new BrokerageMessageEvent(BrokerageMessageType.Warning, "UnsupportedSymbol", $"{operation} rejected. {reason}"));
+            return true;
+        }
+
+        /// <summary>
+        /// Gets the LEAN market of a non USA stock from its IB contract.
+        /// Portfolio updates provide the primary exchange in the exchange field, while open orders provide it in the primary exchange field.
+        /// </summary>
+        internal static bool TryGetEquityMarket(Contract contract, out string market)
+        {
+            market = null;
+            if (!string.IsNullOrEmpty(contract.PrimaryExch) && _equityMarketsByExchange.TryGetValue(contract.PrimaryExch, out market)
+                || !string.IsNullOrEmpty(contract.Exchange) && _equityMarketsByExchange.TryGetValue(contract.Exchange, out market))
+            {
+                return true;
+            }
+
+            // Euronext Oslo is the only supported market quoting stocks in Norwegian krone,
+            // useful for executions, which provide the execution venue in the exchange field
+            if (string.Equals(contract.Currency, Currencies.NOK, StringComparison.InvariantCultureIgnoreCase))
+            {
+                market = Market.EuronextOslo;
+                return true;
+            }
+            return false;
+        }
+
+        /// <summary>
         /// Maps the IB Contract's symbol to a QC symbol
         /// </summary>
         private Symbol MapSymbol(Contract contract)
@@ -4353,6 +4478,11 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
                 var market = InteractiveBrokersBrokerageModel.DefaultMarketMap[securityType];
                 var isFutureOption = contract.SecType == IB.SecurityType.FutureOption;
 
+                if (securityType == SecurityType.Equity && TryGetEquityMarket(contract, out var equityMarket))
+                {
+                    market = equityMarket;
+                }
+
                 if (securityType.IsOption() && contract.LastTradeDateOrContractMonth == "0")
                 {
                     // Try our best to recover from a malformed contract.
@@ -4371,7 +4501,11 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
                 // Handle future options as a Future, up until we actually return the future.
                 if (isFutureOption || securityType == SecurityType.Future)
                 {
-                    var leanSymbol = _symbolMapper.GetLeanRootSymbol(ibSymbol, securityType);
+                    var identifiedByTradingClass = InteractiveBrokersSymbolMapper.TryGetLeanFutureRootSymbol(ibSymbol, contract.TradingClass, out var leanSymbol);
+                    if (!identifiedByTradingClass)
+                    {
+                        leanSymbol = _symbolMapper.GetLeanRootSymbol(ibSymbol, securityType);
+                    }
                     var defaultMarket = market;
 
                     if (!_symbolPropertiesDatabase.TryGetMarket(leanSymbol, SecurityType.Future, out market))
@@ -4385,7 +4519,9 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
 
                     if (!isFutureOption)
                     {
-                        return _symbolMapper.GetLeanSymbol(ibSymbol, SecurityType.Future, market, contractExpiryDate);
+                        return identifiedByTradingClass
+                            ? Symbol.CreateFuture(leanSymbol, market, contractExpiryDate)
+                            : _symbolMapper.GetLeanSymbol(ibSymbol, SecurityType.Future, market, contractExpiryDate);
                     }
 
                     // Get the *actual* futures contract that this futures options contract has as its underlying.
@@ -4714,7 +4850,8 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
 
             if (symbol.Value.IndexOfInvariant("universe", true) != -1
                 // continuous futures and canonical symbols not supported
-                || symbol.IsCanonical())
+                || symbol.IsCanonical()
+                || IsUnsupportedSymbol(symbol, out _))
             {
                 return false;
             }
@@ -4722,11 +4859,12 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
             // Include future options as a special case with no matching market, otherwise
             // our subscriptions are removed without any sort of notice.
             return
-                (securityType == SecurityType.Equity && market == Market.USA) ||
+                (securityType == SecurityType.Equity && (market == Market.USA || _euronextEquityExchanges.ContainsKey(market))) ||
                 (securityType == SecurityType.Forex && (market == Market.Oanda || market == Market.InteractiveBrokers)) ||
                 (securityType == SecurityType.Option && market == Market.USA) ||
                 (securityType == SecurityType.IndexOption && market == Market.USA) ||
-                (securityType == SecurityType.Index && (market == Market.USA || market == Market.EUREX || market == Market.OSE || market == Market.HKFE || market == Market.KRX)) ||
+                (securityType == SecurityType.Index && (market == Market.USA || market == Market.EUREX || market == Market.OSE || market == Market.HKFE || market == Market.KRX
+                    || _euronextIndexExchanges.ContainsKey(market))) ||
                 (securityType == SecurityType.FutureOption) ||
                 (securityType == SecurityType.Future) ||
                 (securityType == SecurityType.Cfd && market == Market.InteractiveBrokers);
@@ -5004,6 +5142,11 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
         /// <returns>Future/Option chain associated with the Symbol provided</returns>
         public IEnumerable<Symbol> LookupSymbols(Symbol symbol, bool includeExpired, string securityCurrency = null)
         {
+            if (RejectUnsupportedSymbol(symbol, nameof(LookupSymbols)))
+            {
+                return Enumerable.Empty<Symbol>();
+            }
+
             // setting up exchange defaults and filters
             var exchangeSpecifier = GetSymbolExchange(symbol);
             var futuresExchanges = _futuresExchanges.Values.Reverse().ToArray();
@@ -5037,6 +5180,11 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
                 IncludeExpired = includeExpired,
                 Multiplier = GetContractMultiplier(symbolProperties.ContractMultiplier)
             };
+
+            if (symbol.SecurityType == SecurityType.Future)
+            {
+                contract.TradingClass = InteractiveBrokersSymbolMapper.GetFutureTradingClass(lookupName);
+            }
 
             Log.Trace($"InteractiveBrokersBrokerage.LookupSymbols(): Requesting symbol list for {contract.Symbol} ...");
 

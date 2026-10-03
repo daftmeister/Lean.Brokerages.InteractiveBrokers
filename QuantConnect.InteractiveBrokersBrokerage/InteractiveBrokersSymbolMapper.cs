@@ -48,6 +48,18 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
         // In those cases we make sure we don't replace dots with spaces when converting from Lean to IB symbols.
         private static HashSet<string> _ibEquityTickersWithDot = new();
 
+        // Euronext index futures share the same IB symbol between their standard and mini contracts (e.g. CAC40 for FCE and MFC),
+        // so they are identified by their trading class, which matches the Euronext product code used as LEAN ticker
+        private static readonly Dictionary<string, string> _euronextFuturesBrokerageSymbols = new()
+        {
+            { Futures.Indices.CAC40, "CAC40" },
+            { Futures.Indices.CAC40Mini, "CAC40" },
+            { Futures.Indices.AEX, "EOE" },
+            { Futures.Indices.BEL20, "BFX" },
+            { Futures.Indices.FTSEMIB, "FTMIB" },
+            { Futures.Indices.FTSEMIBMini, "FTMIB" }
+        };
+
         /// <summary>
         /// Constructs InteractiveBrokersSymbolMapper. Default parameters are used.
         /// </summary>
@@ -203,6 +215,12 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
         /// <returns></returns>
         public string GetBrokerageRootSymbol(string rootSymbol, SecurityType securityType)
         {
+            if ((securityType == SecurityType.Future || securityType == SecurityType.FutureOption)
+                && _euronextFuturesBrokerageSymbols.TryGetValue(rootSymbol, out var euronextBrokerageSymbol))
+            {
+                return euronextBrokerageSymbol;
+            }
+
             var brokerageSymbol = rootSymbol;
             if (TryGetSymbolMap(securityType, out var symbolMap))
             {
@@ -210,6 +228,35 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
             }
 
             return brokerageSymbol ?? rootSymbol;
+        }
+
+        /// <summary>
+        /// Gets the IB trading class required to identify a future contract, if any
+        /// </summary>
+        /// <param name="rootSymbol">LEAN future root symbol</param>
+        /// <returns>The IB trading class, null if the IB symbol is enough to identify the contract</returns>
+        public static string GetFutureTradingClass(string rootSymbol)
+        {
+            return _euronextFuturesBrokerageSymbols.ContainsKey(rootSymbol) ? rootSymbol : null;
+        }
+
+        /// <summary>
+        /// Tries to get the LEAN future root symbol of an IB future identified by its trading class
+        /// </summary>
+        /// <param name="brokerageRootSymbol">IB Brokerage root symbol</param>
+        /// <param name="tradingClass">IB trading class</param>
+        /// <param name="rootSymbol">LEAN future root symbol</param>
+        /// <returns>True if the IB future is identified by its trading class</returns>
+        public static bool TryGetLeanFutureRootSymbol(string brokerageRootSymbol, string tradingClass, out string rootSymbol)
+        {
+            rootSymbol = null;
+            if (!string.IsNullOrEmpty(tradingClass)
+                && _euronextFuturesBrokerageSymbols.TryGetValue(tradingClass, out var brokerageSymbol)
+                && brokerageSymbol == brokerageRootSymbol)
+            {
+                rootSymbol = tradingClass;
+            }
+            return rootSymbol != null;
         }
 
         /// <summary>
@@ -265,7 +312,10 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
             var contractMonthExpiration = DateTime.ParseExact(match[2].Value, "MMM", CultureInfo.CurrentCulture).Month;
             var contractYearExpiration = match[3].Value;
 
-            var leanSymbol = GetLeanRootSymbol(contractSymbol, SecurityType.Future);
+            if (!TryGetLeanFutureRootSymbol(contractSymbol, malformedContract.TradingClass, out var leanSymbol))
+            {
+                leanSymbol = GetLeanRootSymbol(contractSymbol, SecurityType.Future);
+            }
             string market;
             if (!symbolPropertiesDatabase.TryGetMarket(leanSymbol, SecurityType.Future, out market))
             {
@@ -284,7 +334,8 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
                 Exchange = malformedContract.Exchange,
                 SecType = malformedContract.SecType,
                 IncludeExpired = false,
-                Currency = malformedContract.Currency
+                Currency = malformedContract.Currency,
+                TradingClass = malformedContract.TradingClass
             };
         }
 

@@ -222,6 +222,19 @@ namespace QuantConnect.Tests.Brokerages.InteractiveBrokers
                 yield return new TestCaseData(Symbol.Create(Futures.Indices.FTSEMIBMini, SecurityType.Future, Market.EuronextMilan)).SetName("MiniFTSEMIBCanonicalFuture");
                 yield return new TestCaseData(Symbol.CreateOption(Symbol.CreateFuture(Futures.Indices.FTSEMIBMini, Market.EuronextMilan, new DateTime(2026, 12, 18)),
                     Market.EuronextMilan, OptionStyle.European, OptionRight.Call, 40000m, new DateTime(2026, 12, 18))).SetName("MiniFTSEMIBFutureOption");
+                foreach (var (ticker, market) in new[]
+                {
+                    (Futures.Indices.CAC40ESG, Market.EuronextParis), (Futures.Indices.CAC40Dividend, Market.EuronextParis),
+                    (Futures.Indices.EurozoneBanks, Market.EuronextParis), (Futures.Indices.EurozoneESGLarge80, Market.EuronextParis),
+                    (Futures.Indices.FTSEEPRANareitEurozone, Market.EuronextParis), (Futures.Indices.FTSEEPRANareitEurope, Market.EuronextParis),
+                    (Futures.Indices.FTSEEurofirst100, Market.EuronextParis), (Futures.Indices.ISEQ20, Market.EuronextParis),
+                    (Futures.Indices.AMX, Market.EuronextAmsterdam), (Futures.Indices.PSI20, Market.EuronextLisbon)
+                })
+                {
+                    yield return new TestCaseData(Symbol.CreateFuture(ticker, market, new DateTime(2026, 12, 18))).SetName($"Unverified{ticker}Future");
+                }
+                yield return new TestCaseData(Symbol.Create("PSI20", SecurityType.Index, Market.EuronextLisbon)).SetName("PSI20Index");
+                yield return new TestCaseData(Symbol.Create("ISEQ20", SecurityType.Index, Market.EuronextDublin)).SetName("ISEQ20Index");
             }
         }
 
@@ -260,6 +273,7 @@ namespace QuantConnect.Tests.Brokerages.InteractiveBrokers
 
         [TestCase(Futures.Indices.FTSEMIB, Market.EuronextMilan)]
         [TestCase(Futures.Indices.CAC40Mini, Market.EuronextParis)]
+        [TestCase(Futures.Indices.BEL20, Market.EuronextBrussels)]
         public void DoesNotRejectSupportedFutures(string ticker, string market)
         {
             Assert.IsFalse(InteractiveBrokersBrokerage.IsUnsupportedSymbol(Symbol.CreateFuture(ticker, market, new DateTime(2026, 12, 18)), out _));

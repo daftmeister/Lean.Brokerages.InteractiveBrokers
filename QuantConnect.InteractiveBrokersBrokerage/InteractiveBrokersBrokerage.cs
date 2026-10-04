@@ -253,10 +253,29 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
         // Euronext securities not supported until their IB routing is verified:
         // - Euronext Oslo: IB lists some Norwegian stocks under OMXNO instead of OSE, and offers no OBX futures
         // - Mini FTSE MIB futures: IB's listing and trading class (MINI) are not confirmed
+        // - CAC 40 ESG and Dividend, Eurozone Banks and ESG Large 80, FTSE EPRA Nareit Eurozone and Europe,
+        //   FTSE Eurofirst 100, ISEQ 20, AMX and PSI 20 futures: their IB symbol, trading class and exchange
+        //   are not confirmed (PSI 20 futures trade on Euronext Lisbon, which has no IB futures exchange here)
+        // - PSI 20 and ISEQ 20 indices: their IB exchange is not confirmed
         private static readonly HashSet<string> _unsupportedMarkets = new() { Market.EuronextOslo };
         private static readonly HashSet<(string Market, string Ticker)> _unsupportedFutures = new()
         {
-            (Market.EuronextMilan, Futures.Indices.FTSEMIBMini)
+            (Market.EuronextMilan, Futures.Indices.FTSEMIBMini),
+            (Market.EuronextParis, Futures.Indices.CAC40ESG),
+            (Market.EuronextParis, Futures.Indices.CAC40Dividend),
+            (Market.EuronextParis, Futures.Indices.EurozoneBanks),
+            (Market.EuronextParis, Futures.Indices.EurozoneESGLarge80),
+            (Market.EuronextParis, Futures.Indices.FTSEEPRANareitEurozone),
+            (Market.EuronextParis, Futures.Indices.FTSEEPRANareitEurope),
+            (Market.EuronextParis, Futures.Indices.FTSEEurofirst100),
+            (Market.EuronextParis, Futures.Indices.ISEQ20),
+            (Market.EuronextAmsterdam, Futures.Indices.AMX),
+            (Market.EuronextLisbon, Futures.Indices.PSI20)
+        };
+        private static readonly HashSet<(string Market, string Ticker)> _unsupportedIndices = new()
+        {
+            (Market.EuronextLisbon, "PSI20"),
+            (Market.EuronextDublin, "ISEQ20")
         };
 
         // IB exchange of the Euronext indices
@@ -4403,6 +4422,11 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
                 if (current.SecurityType == SecurityType.Future && _unsupportedFutures.Contains((current.ID.Market, current.ID.Symbol)))
                 {
                     reason = $"{current.ID.Symbol} futures are not supported yet by the Interactive Brokers brokerage: {symbol}";
+                    return true;
+                }
+                if (current.SecurityType == SecurityType.Index && _unsupportedIndices.Contains((current.ID.Market, current.ID.Symbol)))
+                {
+                    reason = $"The {current.ID.Symbol} index is not supported yet by the Interactive Brokers brokerage: {symbol}";
                     return true;
                 }
             }
